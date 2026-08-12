@@ -44,7 +44,7 @@ package never creates one automatically. Optional:
 composer require kinetis/queue-sqs
 ```
 
-Requires PHP 8.4+, `kinetis/kinetis`, `kinetis/queue`, and
+Requires PHP 8.4+, `kinetis/framework`, `kinetis/queue`, and
 `kinetis/revolt-http-client`. Full documentation:
 [docs.kinetis.dev/queue-sqs.html](https://docs.kinetis.dev/queue-sqs.html).
 
