@@ -12,13 +12,13 @@
         "php": "^8.4",
         "kinetis/framework": "dev-main",
         "kinetis/queue": "dev-main",
-        "kinetis/persistence": "dev-main",
-        "kinetis/cache-redis": "dev-main",
         "kinetis/revolt-http-client": "dev-main",
         "async-aws/sqs": "^2.9"
     },
     "require-dev": {
         "infection/infection": "^0.34.2",
+        "kinetis/cache-redis": "dev-main",
+        "kinetis/persistence": "dev-main",
         "phpstan/phpstan": "^2.2",
         "phpunit/phpunit": "^11.0",
         "vimeo/psalm": "^6.16"
@@ -36,19 +36,19 @@
     "repositories": [
         {
             "type": "path",
-            "url": "../framework"
-        },
-        {
-            "type": "path",
-            "url": "../queue"
-        },
-        {
-            "type": "path",
             "url": "../persistence"
         },
         {
             "type": "path",
             "url": "../cache-redis"
+        },
+        {
+            "type": "path",
+            "url": "../framework"
+        },
+        {
+            "type": "path",
+            "url": "../queue"
         },
         {
             "type": "path",
