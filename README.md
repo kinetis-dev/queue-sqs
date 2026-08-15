@@ -8,6 +8,14 @@
   <strong>A Fiber-native, non-blocking Amazon SQS backend for kinetis/queue's <code>QueueInterface</code></strong>
 </p>
 
+<p align="center">
+  <a href="https://packagist.org/packages/kinetis/queue-sqs"><img src="https://img.shields.io/packagist/v/kinetis/queue-sqs" alt="Packagist Version"></a>
+  <a href="https://packagist.org/packages/kinetis/queue-sqs"><img src="https://img.shields.io/packagist/dt/kinetis/queue-sqs" alt="Packagist Downloads"></a>
+  <a href="https://packagist.org/packages/kinetis/queue-sqs"><img src="https://img.shields.io/packagist/php-v/kinetis/queue-sqs" alt="PHP Version"></a>
+  <a href="https://packagist.org/packages/kinetis/queue-sqs"><img src="https://img.shields.io/packagist/l/kinetis/queue-sqs" alt="License"></a>
+  <a href="https://github.com/kinetis-dev/kinetis/actions/workflows/ci.yml"><img src="https://github.com/kinetis-dev/kinetis/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+</p>
+
 ---
 
 Adds Amazon SQS as a queue backend. `push()`/`pop()`/`ack()`/`release()`/`fail()`
