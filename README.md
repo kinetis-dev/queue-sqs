@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://packagist.org/packages/kinetis/queue-sqs"><img src="https://img.shields.io/packagist/v/kinetis/queue-sqs" alt="Packagist Version"></a>
+  <a href="https://packagist.org/packages/kinetis/queue-sqs"><img src="https://img.shields.io/packagist/v/kinetis/queue-sqs?label=version" alt="Packagist Version"></a>
   <a href="https://packagist.org/packages/kinetis/queue-sqs"><img src="https://img.shields.io/packagist/dt/kinetis/queue-sqs" alt="Packagist Downloads"></a>
   <a href="https://packagist.org/packages/kinetis/queue-sqs"><img src="https://img.shields.io/packagist/php-v/kinetis/queue-sqs" alt="PHP Version"></a>
   <a href="https://packagist.org/packages/kinetis/queue-sqs"><img src="https://img.shields.io/packagist/l/kinetis/queue-sqs" alt="License"></a>
