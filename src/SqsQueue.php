@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Kinetis\QueueSqs;
 
+use Kinetis\Instrumentation\Telemetry;
 use AsyncAws\Sqs\Enum\MessageSystemAttributeName;
 use AsyncAws\Sqs\Enum\QueueAttributeName;
 use AsyncAws\Sqs\SqsClient;
@@ -13,6 +14,7 @@ use Kinetis\Queue\JobSerializer;
 use Kinetis\Queue\QueueInterface;
 use Kinetis\Queue\QueuedJob;
 use Kinetis\QueueSqs\Exception\SqsQueueException;
+use Throwable;
 
 /**
  * SQS already solves what Kinetis\Queue\RedisQueue and Kinetis\Queue\SqlQueue
@@ -72,6 +74,8 @@ final class SqsQueue implements QueueInterface
 
     private const MAX_ATTEMPTS_ATTRIBUTE = 'maxAttempts';
 
+    private const METADATA_ATTRIBUTE = 'metadata';
+
     /** @var array<string, string> */
     private array $queueUrlsByName = [];
 
@@ -89,24 +93,51 @@ final class SqsQueue implements QueueInterface
             );
         }
 
-        $serialized = JobSerializer::serialize($job);
+        $telemetry = Telemetry::global();
+        $telemetryToken = $telemetry->jobPushStarted($job::class, $queue);
 
-        $input = [
-            'QueueUrl' => $this->resolveQueueUrl($queue),
-            'MessageBody' => json_encode($serialized, JSON_THROW_ON_ERROR),
-            'DelaySeconds' => $delaySeconds,
-        ];
+        try {
+            $serialized = JobSerializer::serialize($job);
 
-        if ($maxAttempts !== null) {
-            $input['MessageAttributes'] = [
-                self::MAX_ATTEMPTS_ATTRIBUTE => [
+            $input = [
+                'QueueUrl' => $this->resolveQueueUrl($queue),
+                'MessageBody' => json_encode($serialized, JSON_THROW_ON_ERROR),
+                'DelaySeconds' => $delaySeconds,
+            ];
+
+            $attributes = [];
+
+            if ($maxAttempts !== null) {
+                $attributes[self::MAX_ATTEMPTS_ATTRIBUTE] = [
                     'DataType' => 'Number',
                     'StringValue' => (string) $maxAttempts,
-                ],
-            ];
-        }
+                ];
+            }
 
-        $this->client->sendMessage($input);
+            $metadata = $telemetry->jobPushMetadata($telemetryToken);
+
+            if ($metadata !== []) {
+                // One JSON-encoded attribute, whatever the carrier keys —
+                // SQS caps a message at ten attributes, so per-key
+                // attributes would leak that limit into the metadata
+                // contract.
+                $attributes[self::METADATA_ATTRIBUTE] = [
+                    'DataType' => 'String',
+                    'StringValue' => json_encode($metadata, JSON_THROW_ON_ERROR),
+                ];
+            }
+
+            if ($attributes !== []) {
+                $input['MessageAttributes'] = $attributes;
+            }
+
+            $this->client->sendMessage($input);
+            $telemetry->jobPushEnded($telemetryToken, null);
+        } catch (Throwable $e) {
+            $telemetry->jobPushEnded($telemetryToken, $e);
+
+            throw $e;
+        }
     }
 
     #[\Override]
@@ -217,7 +248,7 @@ final class SqsQueue implements QueueInterface
             'MaxNumberOfMessages' => 1,
             'WaitTimeSeconds' => $waitTimeSeconds,
             'AttributeNames' => [MessageSystemAttributeName::APPROXIMATE_RECEIVE_COUNT],
-            'MessageAttributeNames' => [self::MAX_ATTEMPTS_ATTRIBUTE],
+            'MessageAttributeNames' => [self::MAX_ATTEMPTS_ATTRIBUTE, self::METADATA_ATTRIBUTE],
         ]);
 
         $messages = $result->getMessages();
@@ -238,6 +269,11 @@ final class SqsQueue implements QueueInterface
         /** @var array{class: class-string<Job>, args: array<string, mixed>} $decoded */
         $decoded = json_decode((string) $message->getBody(), true, flags: JSON_THROW_ON_ERROR);
 
+        /** @var array<string, string> $metadata */
+        $metadata = isset($messageAttributes[self::METADATA_ATTRIBUTE])
+            ? json_decode((string) $messageAttributes[self::METADATA_ATTRIBUTE]->getStringValue(), true, flags: JSON_THROW_ON_ERROR)
+            : [];
+
         return new QueuedJob(
             $decoded['class'],
             $decoded['args'],
@@ -245,6 +281,7 @@ final class SqsQueue implements QueueInterface
             queue: $queue,
             attempts: (int) $receiveCount,
             maxAttempts: $maxAttempts,
+            metadata: $metadata,
         );
     }
 
