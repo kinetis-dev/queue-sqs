@@ -19,7 +19,7 @@ use Kinetis\RevoltHttpClient\AmpHttpClientFactory;
  * standard AWS SDK convention.
  *
  * $connection selects a named connection via Config::scopedKey() — plugged
- * into kinetis/queue's own bin/queue dispatch when QUEUE_CONNECTION=sqs,
+ * into kinetis/queue's QueueFactory dispatch when QUEUE_CONNECTION=sqs,
  * never resolved automatically by type.
  */
 final class SqsClientFactory

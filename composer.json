@@ -33,6 +33,9 @@
             "Kinetis\\QueueSqs\\Tests\\": "tests/"
         }
     },
+    "extra": {
+        "kinetis": {}
+    },
     "repositories": [
         {
             "type": "path",

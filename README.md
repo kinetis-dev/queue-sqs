@@ -31,20 +31,30 @@ $queue = new SqsQueue(SqsClientFactory::fromConfig($config));
 $queue->push(new SendWelcomeEmail($email, $name), queue: 'default');
 ```
 
-## Configuring
+## Configuration
 
 ```
 QUEUE_CONNECTION=sqs
 QUEUE_SQS_REGION=us-east-1
 ```
 
+| Key | Default | Purpose |
+|---|---|---|
+| `QUEUE_SQS_REGION` | *(required)* | AWS region. |
+| `QUEUE_SQS_ENDPOINT` | — | SQS-compatible endpoint (e.g. LocalStack). |
+| `QUEUE_SQS_QUEUE_PREFIX` | — | Prepended to every queue name — for shared AWS accounts. |
+
+All three are scoped — `QUEUE_SQS_REGION` + `reports` →
+`QUEUE_REPORTS_SQS_REGION`. `kinetis/queue`'s own keys
+(`QUEUE_CONNECTION`, `QUEUE_MAX_ATTEMPTS`, ...) are documented in that
+package; full reference:
+[docs.kinetis.dev/config.html](https://docs.kinetis.dev/config.html).
+
 Credentials are never read from Kinetis config — AsyncAws's own default
 credential provider chain (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, or
 an IAM role) resolves them. A `push()`/`pop()` queue name resolves
 directly to an SQS queue of that name — create it ahead of time; this
-package never creates one automatically. Optional:
-`QUEUE_SQS_ENDPOINT` (an SQS-compatible local service, e.g. LocalStack),
-`QUEUE_SQS_QUEUE_PREFIX` (prepended to every queue name).
+package never creates one automatically.
 
 ## Installation
 
