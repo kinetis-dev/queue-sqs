@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Kinetis\QueueSqs;
 
 use AsyncAws\Sqs\Enum\MessageSystemAttributeName;
+use AsyncAws\Sqs\Enum\QueueAttributeName;
 use AsyncAws\Sqs\SqsClient;
 use InvalidArgumentException;
 use Kinetis\Queue\Job;
@@ -169,6 +170,44 @@ final class SqsQueue implements QueueInterface
             'QueueUrl' => $this->resolveQueueUrl($job->queue),
             'ReceiptHandle' => (string) $job->handle,
         ]);
+    }
+
+    /**
+     * SQS reports message counts as estimates rather than exact figures —
+     * `ApproximateNumberOfMessages` plus `ApproximateNumberOfMessagesDelayed`
+     * here, so a delayed job counts as outstanding the same way it does on
+     * every other backend. Accurate enough to alert on, never a value to
+     * branch on.
+     */
+    #[\Override]
+    public function size(string $queue = 'default'): int
+    {
+        $attributes = $this->client->getQueueAttributes([
+            'QueueUrl' => $this->resolveQueueUrl($queue),
+            'AttributeNames' => [
+                QueueAttributeName::APPROXIMATE_NUMBER_OF_MESSAGES,
+                QueueAttributeName::APPROXIMATE_NUMBER_OF_MESSAGES_DELAYED,
+            ],
+        ])->getAttributes();
+
+        return (int) ($attributes[QueueAttributeName::APPROXIMATE_NUMBER_OF_MESSAGES] ?? 0)
+            + (int) ($attributes[QueueAttributeName::APPROXIMATE_NUMBER_OF_MESSAGES_DELAYED] ?? 0);
+    }
+
+    /**
+     * PurgeQueue deletes everything and returns no count, so the figure
+     * reported is the estimate taken immediately beforehand. AWS also
+     * rate-limits this to once per 60 seconds per queue and may take up
+     * to 60 seconds to finish, during which messages sent meanwhile can
+     * also be deleted.
+     */
+    #[\Override]
+    public function clear(string $queue = 'default'): int
+    {
+        $size = $this->size($queue);
+        $this->client->purgeQueue(['QueueUrl' => $this->resolveQueueUrl($queue)]);
+
+        return $size;
     }
 
     private function receiveFrom(string $queue, int $waitTimeSeconds): ?QueuedJob
