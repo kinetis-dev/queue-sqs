@@ -13,15 +13,15 @@
         "kinetis/framework": "dev-main",
         "kinetis/queue": "dev-main",
         "kinetis/revolt-http-client": "dev-main",
-        "async-aws/sqs": "^2.9"
+        "async-aws/sqs": "^2.9.0"
     },
     "require-dev": {
-        "infection/infection": "^0.34.2",
+        "infection/infection": "^0.35.0",
         "kinetis/cache-redis": "dev-main",
         "kinetis/persistence": "dev-main",
-        "phpstan/phpstan": "^2.2",
-        "phpunit/phpunit": "^11.0",
-        "vimeo/psalm": "^6.16"
+        "phpstan/phpstan": "^2.2.8",
+        "phpunit/phpunit": "^12.5.33",
+        "vimeo/psalm": "^6.16.1"
     },
     "autoload": {
         "psr-4": {
