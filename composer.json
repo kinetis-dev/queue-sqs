@@ -10,9 +10,9 @@
     ],
     "require": {
         "php": "^8.4",
-        "kinetis/framework": "dev-main",
-        "kinetis/queue": "dev-main",
-        "kinetis/revolt-http-client": "dev-main",
+        "kinetis/framework": "^1.28.3",
+        "kinetis/queue": "^1.7.0",
+        "kinetis/revolt-http-client": "^1.2.1",
         "async-aws/sqs": "^2.9.0"
     },
     "require-dev": {
@@ -34,20 +34,6 @@
     "extra": {
         "kinetis": {}
     },
-    "repositories": [
-        {
-            "type": "path",
-            "url": "../framework"
-        },
-        {
-            "type": "path",
-            "url": "../queue"
-        },
-        {
-            "type": "path",
-            "url": "../revolt-http-client"
-        }
-    ],
     "config": {
         "sort-packages": true,
         "allow-plugins": {
