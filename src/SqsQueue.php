@@ -17,7 +17,7 @@ use Kinetis\QueueSqs\Exception\SqsQueueException;
 use Throwable;
 
 /**
- * SQS already solves what Kinetis\Queue\RedisQueue and Kinetis\Queue\SqlQueue
+ * SQS already solves what Kinetis\QueueRedis\RedisQueue and Kinetis\QueueSql\SqlQueue
  * each needed their own mechanism for: per-message delay (SendMessage's own
  * DelaySeconds, capped at 900 seconds — SQS's own hard limit, thrown against
  * here rather than silently clamped) and reliable at-least-once delivery
