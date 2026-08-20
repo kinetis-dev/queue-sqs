@@ -63,6 +63,14 @@ use Throwable;
  * more (cheap, but not free) ReceiveMessage calls; a longer one is the
  * opposite. Standard SQS queues only — FIFO queues (the `.fifo` suffix,
  * requiring MessageGroupId on every send) are not supported.
+ *
+ * The "without busy-polling" guarantee above needs one more piece: once
+ * less than a full second remains before $timeoutSeconds's own deadline,
+ * WaitTimeSeconds (an integer — SQS has no fractional long-poll) would
+ * otherwise floor to 0, an immediate non-blocking call rather than a
+ * real wait. pop() treats that final sub-second window the same as the
+ * deadline already having passed rather than looping through repeated
+ * 0-wait calls, one per queue, until it actually does.
  */
 final class SqsQueue implements QueueInterface
 {
@@ -151,14 +159,22 @@ final class SqsQueue implements QueueInterface
 
         while (true) {
             foreach ($queues as $queue) {
-                if ($deadline !== null && microtime(true) >= $deadline) {
+                // Less than a full second left rounds down to a 0
+                // WaitTimeSeconds (an immediate, non-blocking
+                // ReceiveMessage rather than a real long poll) —
+                // treated the same as the deadline already having
+                // passed, rather than looping through repeated 0-wait
+                // calls (one per queue, every pass) until it actually
+                // does. SQS's own WaitTimeSeconds has no fractional
+                // form to ask for instead.
+                if ($deadline !== null && $deadline - microtime(true) < 1.0) {
                     return null;
                 }
 
                 $waitTimeSeconds = self::PER_QUEUE_WAIT_TIME_SECONDS;
 
                 if ($deadline !== null) {
-                    $waitTimeSeconds = max(0, min($waitTimeSeconds, (int) floor($deadline - microtime(true))));
+                    $waitTimeSeconds = max(1, min($waitTimeSeconds, (int) floor($deadline - microtime(true))));
                 }
 
                 $job = $this->receiveFrom($queue, min($waitTimeSeconds, self::MAX_WAIT_TIME_SECONDS));
