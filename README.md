@@ -48,7 +48,7 @@ All three are scoped — `QUEUE_SQS_REGION` + `reports` →
 `QUEUE_REPORTS_SQS_REGION`. `kinetis/queue`'s own keys
 (`QUEUE_CONNECTION`, `QUEUE_MAX_ATTEMPTS`, ...) are documented in that
 package; full reference:
-[docs.kinetis.dev/config.html](https://docs.kinetis.dev/config.html).
+[kinetis.dev/docs/config.html](https://kinetis.dev/docs/config.html).
 
 Credentials are never read from Kinetis config — AsyncAws's own default
 credential provider chain (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, or
@@ -64,7 +64,7 @@ composer require kinetis/queue-sqs
 
 Requires PHP 8.4+, `kinetis/framework`, `kinetis/queue`, and
 `kinetis/revolt-http-client`. Full documentation:
-[docs.kinetis.dev/queue-sqs.html](https://docs.kinetis.dev/queue-sqs.html).
+[kinetis.dev/docs/queue-sqs.html](https://kinetis.dev/docs/queue-sqs.html).
 
 ## License
 
