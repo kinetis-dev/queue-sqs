@@ -18,6 +18,10 @@
 
 ---
 
+Part of [Kinetis](https://kinetis.dev/), a non-blocking PHP framework for
+API-first applications, developed in the
+[kinetis-dev/kinetis](https://github.com/kinetis-dev/kinetis) monorepo.
+
 Adds Amazon SQS as a queue backend. `push()`/`pop()`/`ack()`/`release()`/`fail()`
 work exactly like any other backend — only your configuration changes.
 
@@ -45,7 +49,7 @@ QUEUE_SQS_REGION=us-east-1
 | `QUEUE_SQS_QUEUE_PREFIX` | — | Prepended to every queue name — for shared AWS accounts. |
 
 All three are scoped — `QUEUE_SQS_REGION` + `reports` →
-`QUEUE_REPORTS_SQS_REGION`. `kinetis/queue`'s own keys
+`QUEUE_REPORTS_SQS_REGION`. [`kinetis/queue`](https://github.com/kinetis-dev/queue)'s own keys
 (`QUEUE_CONNECTION`, `QUEUE_MAX_ATTEMPTS`, ...) are documented in that
 package; full reference:
 [kinetis.dev/docs/config.html](https://kinetis.dev/docs/config.html).
@@ -62,8 +66,8 @@ package never creates one automatically.
 composer require kinetis/queue-sqs
 ```
 
-Requires PHP 8.4+, `kinetis/framework`, `kinetis/queue`, and
-`kinetis/revolt-http-client`. Full documentation:
+Requires PHP 8.4+, [`kinetis/framework`](https://github.com/kinetis-dev/framework), [`kinetis/queue`](https://github.com/kinetis-dev/queue), and
+[`kinetis/revolt-http-client`](https://github.com/kinetis-dev/revolt-http-client). Full documentation:
 [kinetis.dev/docs/queue-sqs.html](https://kinetis.dev/docs/queue-sqs.html).
 
 ## License
