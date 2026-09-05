@@ -76,6 +76,36 @@ use Throwable;
  * code without an existing Fiber. Standard SQS queues only — FIFO queues
  * (the `.fifo` suffix, requiring MessageGroupId on every send) are not
  * supported.
+ *
+ * QueuedJob::$handle is the message's ReceiptHandle, which SQS scopes to
+ * the receive that produced it — the delivery-receipt shape QueuedJob's
+ * own docblock describes. This backend raises no
+ * Kinetis\Queue\Exception\StaleJobHandleException of its own; whatever
+ * SQS answers a settlement with propagates as its own error.
+ *
+ * Kinetis\Queue\ClearableQueueInterface is not implemented here, there
+ * is no clear() at all, and PurgeQueue is never called. SQS offers no
+ * operation matching that contract:
+ *
+ * - PurgeQueue deletes in-flight messages a worker already holds along
+ *   with waiting ones, and keeps deleting messages sent during the
+ *   up-to-60-second window it takes to finish — so it destroys both a
+ *   reservation somebody owns and work pushed after the call. It
+ *   reports no count, and is rate-limited to once per 60 seconds per
+ *   queue.
+ * - size() could not report what such a call removed even as an
+ *   after-the-fact estimate: it excludes in-flight work by definition,
+ *   and SQS's own numbers are approximate.
+ * - Deleting only waiting messages cannot be assembled out of
+ *   ReceiveMessage/DeleteMessage either — a delayed message is
+ *   invisible until its DelaySeconds elapses, so nothing can receive it
+ *   in order to delete it.
+ *
+ * Emptying an SQS queue is an infrastructure operation instead — `aws
+ * sqs purge-queue`, or recreating the queue — like provisioning it in
+ * the first place, which this backend also leaves to infrastructure. A
+ * method here would have to promise less than PurgeQueue delivers or
+ * more than this backend can, so there is none.
  */
 final class SqsQueue implements QueueInterface
 {
@@ -265,22 +295,6 @@ final class SqsQueue implements QueueInterface
             + (int) ($attributes[QueueAttributeName::APPROXIMATE_NUMBER_OF_MESSAGES_DELAYED] ?? 0);
     }
 
-    /**
-     * PurgeQueue deletes everything and returns no count, so the figure
-     * reported is the estimate taken immediately beforehand. AWS also
-     * rate-limits this to once per 60 seconds per queue and may take up
-     * to 60 seconds to finish, during which messages sent meanwhile can
-     * also be deleted.
-     */
-    #[\Override]
-    public function clear(string $queue = 'default'): int
-    {
-        $size = $this->size($queue);
-        $this->client->purgeQueue(['QueueUrl' => $this->resolveQueueUrl($queue)]);
-
-        return $size;
-    }
-
     private function receiveFrom(string $queue, int $waitTimeSeconds): ?QueuedJob
     {
         $result = $this->client->receiveMessage([
@@ -379,13 +393,13 @@ final class SqsQueue implements QueueInterface
 
     /**
      * The one choke point every real SQS operation (push, pop's own
-     * probe, size, clear) reaches this backend's storage through —
-     * validating $queue here, not separately in each of those, is what
-     * closes size()/clear() having had no validation of their own at
-     * all. push()/pop() each also validate independently, ahead of this
-     * (push() before building anything else; pop() via PopSweep before
-     * touching any queue) — redundant for those two specifically, but
-     * this is the one call every path actually shares.
+     * probe, size) reaches this backend's storage through — validating
+     * $queue here, not separately in each of those, is what closes
+     * size() having had no validation of its own at all. push()/pop()
+     * each also validate independently, ahead of this (push() before
+     * building anything else; pop() via PopSweep before touching any
+     * queue) — redundant for those two specifically, but this is the
+     * one call every path actually shares.
      */
     private function resolveQueueUrl(string $queue): string
     {

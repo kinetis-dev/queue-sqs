@@ -25,6 +25,26 @@ API-first applications, developed in the
 Adds Amazon SQS as a queue backend. `push()`/`pop()`/`ack()`/`release()`/`fail()`
 work exactly like any other backend — only your configuration changes.
 
+`SqsQueue` implements `Kinetis\Queue\QueueInterface` and not
+`Kinetis\Queue\ClearableQueueInterface`: it has no `clear()`, and
+`kinetis queue:clear` names the backend and stops. SQS offers no
+operation that meets the clearing contract. `PurgeQueue` deletes the
+messages a worker holds in flight along with the waiting ones, keeps
+deleting messages sent during the up-to-60-second window it takes to
+finish, reports no count, and is rate-limited to once per 60 seconds per
+queue — so this package never calls it. `size()` could not report what
+such a call destroyed either: it excludes in-flight work and is an
+estimate. Empty an SQS queue the way you created it, with `aws sqs
+purge-queue` or by recreating it.
+
+`QueuedJob::$handle` is the message's `ReceiptHandle`, which SQS scopes
+to the receive that produced it. This backend cannot tell SQS's answer
+for a spent handle apart from any other API error, so it raises no
+`Kinetis\Queue\Exception\StaleJobHandleException` and whatever SQS
+returns propagates as itself. SQS can also redeliver a message
+independently of anything this package does, so job handlers have to be
+idempotent.
+
 ```php
 use Kinetis\Config\Config;
 use Kinetis\QueueSqs\SqsClientFactory;

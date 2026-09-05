@@ -12,6 +12,10 @@ use Kinetis\Queue\QueueInterface;
  * by `kinetis/queue`'s own `QueueFactory::fromConfig()`, gated behind a
  * `class_exists()` check so core never depends on this package
  * directly.
+ *
+ * Returns `QueueInterface`: this backend declares no capability beyond
+ * it, `Kinetis\Queue\ClearableQueueInterface` included — see
+ * `SqsQueue`'s own docblock for why.
  */
 final class SqsQueueFactory
 {
