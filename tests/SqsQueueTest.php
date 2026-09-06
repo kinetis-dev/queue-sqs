@@ -8,10 +8,8 @@ use AsyncAws\Core\Credentials\NullProvider;
 use AsyncAws\Sqs\SqsClient;
 use InvalidArgumentException;
 use Kinetis\Config\Config;
+use Kinetis\Queue\Exception\InvalidQueueArgumentException;
 use Kinetis\Queue\ClearableQueueInterface;
-use Kinetis\Queue\Exception\InvalidDelaySecondsException;
-use Kinetis\Queue\Exception\InvalidMaxAttemptsException;
-use Kinetis\Queue\Exception\InvalidQueueNameException;
 use Kinetis\Queue\Exception\MalformedQueuedJobDataException;
 use Kinetis\Console\CommandArguments;
 use Kinetis\Queue\Console\ClearCommand;
@@ -64,7 +62,7 @@ final class SqsQueueTest extends TestCase
     {
         $queue = $this->neverConnectedQueue();
 
-        $this->expectException(InvalidQueueNameException::class);
+        $this->expectException(InvalidQueueArgumentException::class);
         $queue->size('');
     }
 
@@ -72,7 +70,7 @@ final class SqsQueueTest extends TestCase
     {
         $queue = $this->neverConnectedQueue();
 
-        $this->expectException(InvalidQueueNameException::class);
+        $this->expectException(InvalidQueueArgumentException::class);
         $queue->size('has spaces');
     }
 
@@ -83,7 +81,7 @@ final class SqsQueueTest extends TestCase
             queueNamePrefix: str_repeat('a', 75),
         );
 
-        $this->expectException(InvalidQueueNameException::class);
+        $this->expectException(InvalidQueueArgumentException::class);
         $this->expectExceptionMessage('over the 80-character limit');
         $queue->size(str_repeat('b', 10));
     }
@@ -92,7 +90,7 @@ final class SqsQueueTest extends TestCase
     {
         $queue = $this->neverConnectedQueue();
 
-        $this->expectException(InvalidDelaySecondsException::class);
+        $this->expectException(InvalidQueueArgumentException::class);
         $queue->push(new class implements Job {}, delaySeconds: -1);
     }
 
@@ -100,7 +98,7 @@ final class SqsQueueTest extends TestCase
     {
         $queue = $this->neverConnectedQueue();
 
-        $this->expectException(InvalidMaxAttemptsException::class);
+        $this->expectException(InvalidQueueArgumentException::class);
         $queue->push(new class implements Job {}, maxAttempts: -1);
     }
 
@@ -136,8 +134,8 @@ final class SqsQueueTest extends TestCase
      * malformed value is actually caught — proven directly with hand-built
      * strings (no real SQS round trip needed, since this method was
      * extracted specifically to make that possible), so the wiring
-     * between it and QueueContract::coerceStoredInteger() is exercised
-     * too, not just coerceStoredInteger()'s own unit-level behavior.
+     * between it and QueueContract::storedInt() is exercised
+     * too, not just storedInt()'s own unit-level behavior.
      */
     #[DataProvider('malformedStoredIntegers')]
     public function test_build_queued_job_rejects_a_non_numeric_stored_max_attempts_value(mixed $raw): void
@@ -433,6 +431,101 @@ final class SqsQueueTest extends TestCase
             $transport->operations,
             'nothing here empties a queue, and there is no operation available that could',
         );
+    }
+
+    /**
+     * pop()'s long poll is bounded by what is left of its own deadline,
+     * not only by BLOCK_WAIT_TIME_SECONDS: an idle pop(1) that asked SQS
+     * for a five-second wait would overshoot its caller's deadline
+     * fivefold, which is what bounds a QueueWorker's shutdown latency.
+     *
+     * The recorded WaitTimeSeconds values are the whole account: 0 for
+     * the immediate priority sweep, then the bounded wait, then the
+     * sweep that finds the message.
+     */
+    public function test_the_long_poll_is_bounded_by_the_remaining_pop_deadline(): void
+    {
+        $queue = new SqsQueue(new SqsClient(
+            ['region' => 'us-east-1'],
+            new NullProvider(),
+            ($transport = new RecordingSqsTransport([
+                'GetQueueUrl' => self::queueUrlResponse(),
+                'ReceiveMessage' => [self::emptyReceiveResponse(), self::emptyReceiveResponse(), self::receivedResponse('receipt-1')],
+            ]))->client(),
+        ));
+
+        self::assertNotNull($queue->pop(timeoutSeconds: 1));
+        self::assertSame([0, 1, 0], self::waitTimes($transport));
+    }
+
+    /**
+     * The long poll can use up the whole deadline on its own —
+     * WaitTimeSeconds counts whole seconds, so the shortest wait
+     * available is already a full one. Once it comes back empty the
+     * deadline is rechecked before anything else, so an expired pop()
+     * receives nothing more: the recorded waits are the two the one
+     * priority sweep issues, then the poll, and nothing after it.
+     *
+     * The scripted long poll takes longer than the deadline it is given
+     * for exactly that reason.
+     */
+    public function test_pop_receives_nothing_once_the_long_poll_has_consumed_the_deadline(): void
+    {
+        $queue = new SqsQueue(new SqsClient(
+            ['region' => 'us-east-1'],
+            new NullProvider(),
+            ($transport = new RecordingSqsTransport(
+                [
+                    'GetQueueUrl' => self::queueUrlResponse(),
+                    'ReceiveMessage' => self::emptyReceiveResponse(),
+                ],
+                longPollMicroseconds: 1_100_000,
+            ))->client(),
+        ));
+
+        self::assertNull($queue->pop(timeoutSeconds: 1, queues: ['high', 'default']));
+        self::assertSame([0, 0, 1], self::waitTimes($transport));
+    }
+
+    /**
+     * The same wait, given a deadline far past it: BLOCK_WAIT_TIME_SECONDS
+     * is the ceiling, so a lower-priority queue is still re-checked
+     * promptly rather than once every twenty seconds.
+     */
+    public function test_the_long_poll_never_exceeds_the_backend_wait_ceiling(): void
+    {
+        $queue = new SqsQueue(new SqsClient(
+            ['region' => 'us-east-1'],
+            new NullProvider(),
+            ($transport = new RecordingSqsTransport([
+                'GetQueueUrl' => self::queueUrlResponse(),
+                'ReceiveMessage' => [self::emptyReceiveResponse(), self::emptyReceiveResponse(), self::receivedResponse('receipt-1')],
+            ]))->client(),
+        ));
+
+        self::assertNotNull($queue->pop(timeoutSeconds: 300));
+        self::assertSame([0, 5, 0], self::waitTimes($transport));
+    }
+
+    /**
+     * @return list<int>
+     */
+    private static function waitTimes(RecordingSqsTransport $transport): array
+    {
+        $waits = [];
+
+        foreach ($transport->operations as $index => $operation) {
+            if ($operation === 'ReceiveMessage') {
+                $waits[] = (int) ($transport->requests[$index]['WaitTimeSeconds'] ?? -1);
+            }
+        }
+
+        return $waits;
+    }
+
+    private static function emptyReceiveResponse(): string
+    {
+        return self::json([]);
     }
 
     private static function queueUrlResponse(): string

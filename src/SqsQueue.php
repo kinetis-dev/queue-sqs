@@ -9,111 +9,80 @@ use AsyncAws\Sqs\Enum\MessageSystemAttributeName;
 use AsyncAws\Sqs\Enum\QueueAttributeName;
 use AsyncAws\Sqs\SqsClient;
 use InvalidArgumentException;
-use Kinetis\Queue\Exception\InvalidQueueNameException;
+use Kinetis\Queue\Exception\InvalidQueueArgumentException;
 use Kinetis\Queue\Exception\MalformedQueuedJobDataException;
 use Kinetis\Queue\Job;
 use Kinetis\Queue\JobSerializer;
 use Kinetis\Queue\QueueContract;
 use Kinetis\Queue\QueueInterface;
 use Kinetis\Queue\QueuedJob;
-use Kinetis\Queue\Support\PopSweep;
 use Kinetis\QueueSqs\Exception\SqsQueueException;
-use LogicException;
 use Throwable;
 
 /**
- * SQS already solves what Kinetis\QueueRedis\RedisQueue and Kinetis\QueueSql\SqlQueue
- * each needed their own mechanism for: per-message delay (SendMessage's own
- * DelaySeconds, capped at 900 seconds — SQS's own hard limit, thrown against
- * here rather than silently clamped) and reliable at-least-once delivery
- * (a message stays invisible, not deleted, for its queue's visibility
- * timeout once received — release()/ack()/fail() are all just
- * ChangeMessageVisibility/DeleteMessage calls, no separate "processing
- * list"/"reserved_at column" of our own to maintain).
+ * SQS provides natively what RedisQueue and SqlQueue each need their own
+ * mechanism for: per-message delay (SendMessage's DelaySeconds, capped at
+ * 900 seconds — SQS's hard limit, raised against here rather than
+ * silently clamped) and at-least-once delivery (a received message stays
+ * invisible rather than deleted for its queue's visibility timeout, so
+ * ack()/release()/fail() are DeleteMessage and ChangeMessageVisibility
+ * calls with no processing list or reserved_at column to maintain).
  *
- * $attempts (see QueuedJob) comes directly from SQS's own
- * ApproximateReceiveCount system attribute — no attempts bookkeeping of our
- * own needed, unlike RedisQueue (embedded in the JSON payload) or SqlQueue
- * (a dedicated column). AWS documents this count as *approximate*, not
- * exact, under rare failure conditions — a disclosed imprecision, the same
- * category as RedisQueue's own delayed-job-promotion timing note.
+ * $attempts comes from SQS's own ApproximateReceiveCount system
+ * attribute. AWS documents that count as approximate under rare failure
+ * conditions — a disclosed imprecision, not an exact counter.
  *
- * $maxAttempts has no native SQS equivalent, so it travels as a custom
- * "maxAttempts" MessageAttribute, set at push() and read back at pop() —
- * absent means null, deferring to the processing QueueWorker's own
- * $defaultMaxAttempts, identical to every other backend.
+ * $maxAttempts has no native equivalent, so it travels as a custom
+ * "maxAttempts" message attribute; absent means null, deferring to the
+ * processing worker's own default as on every other backend.
  *
- * Queue names are resolved to SQS queue URLs via GetQueueUrl and cached for
- * this instance's lifetime — one instance is constructed once per worker
- * (the same lifecycle RedisQueue/SqlQueue already have), so the cache never
- * spans more than one worker process. $queueNamePrefix (optional) lets
- * "high"/"default" map to e.g. "myapp-high"/"myapp-default" so multiple
- * environments sharing one AWS account don't collide on plain queue names.
- * A queue itself is never auto-created here — the same "real
- * infrastructure resource, provisioned explicitly, not a side effect of
- * normal runtime operation" reasoning SqlQueue's own `kinetis_queue_jobs`
- * table (deliberately not auto-created, unlike SqlMigrationRepository's
- * tiny bookkeeping table) already applies.
+ * Queue names resolve to queue URLs via GetQueueUrl, cached for this
+ * instance's lifetime — one instance per worker process, so the cache
+ * never outlives one. $queueNamePrefix maps "high"/"default" onto
+ * "myapp-high"/"myapp-default" so environments sharing an AWS account do
+ * not collide. A queue is never auto-created: provisioning is an
+ * infrastructure operation, the same stance SqlQueue takes toward its
+ * own table. Standard queues only — FIFO queues, which require
+ * MessageGroupId on every send, are not supported.
  *
- * pop()'s whole priority/timeout algorithm is Kinetis\Queue\Support\PopSweep
- * — see that class and QueueInterface's own docblock for the full
- * cross-backend contract. This class supplies exactly one thing PopSweep
- * needs: probe(), a single-queue check that can spend up to a given wait
- * budget — receiveFrom() underneath, with the wait budget mapped
- * straight onto ReceiveMessage's own WaitTimeSeconds (capped at 20
- * seconds, SQS's own hard limit).
+ * pop() sweeps every queue with an immediate ReceiveMessage first, then
+ * long-polls the highest-priority queue for a bounded slice before
+ * sweeping again — see QueueInterface for the contract. WaitTimeSeconds
+ * maps straight onto that: 0 is a genuine non-blocking receive on SQS,
+ * and the maximum long poll is 20 seconds. The injected AmpHttpClient
+ * transport suspends the calling Fiber and tolerates being called from
+ * top-level code with no existing Fiber, so no Timer or concurrently()
+ * wrapper is needed.
  *
- * Unlike Redis's BRPOPLPUSH (where a literal 0 timeout means "block
- * forever"), SQS's WaitTimeSeconds: 0 genuinely means an immediate,
- * non-blocking call — exactly PopSweep's own zero-wait, immediate-sweep
- * meaning, so probe() maps a sub-one-second remaining budget (WaitTimeSeconds
- * is an integer; SQS has no fractional long-poll) onto that same 0
- * rather than rounding up (materially overshooting the deadline) or down
- * to a real wait that never happens. No Kinetis\Async\Timer::delay()
- * between attempts the way SqlQueue needs (SQL has no blocking-wait
- * primitive at all), and no concurrently() wrapper either: the injected
- * AmpHttpClient transport tolerates being called from plain top-level
- * code without an existing Fiber. Standard SQS queues only — FIFO queues
- * (the `.fifo` suffix, requiring MessageGroupId on every send) are not
- * supported.
+ * **Settlements here are unfenced.** QueuedJob::$handle is the message's
+ * ReceiptHandle, which SQS scopes to the receive that produced it, but
+ * this backend raises no Exception\StaleJobHandleException of its own:
+ * whatever SQS answers a settlement with propagates as its own error.
+ * A settlement against a delivery whose visibility timeout already
+ * expired is therefore not reported as a lost delivery the way
+ * RedisQueue and SqlQueue report one.
  *
- * QueuedJob::$handle is the message's ReceiptHandle, which SQS scopes to
- * the receive that produced it — the delivery-receipt shape QueuedJob's
- * own docblock describes. This backend raises no
- * Kinetis\Queue\Exception\StaleJobHandleException of its own; whatever
- * SQS answers a settlement with propagates as its own error.
- *
- * Kinetis\Queue\ClearableQueueInterface is not implemented here, there
- * is no clear() at all, and PurgeQueue is never called. SQS offers no
- * operation matching that contract:
- *
- * - PurgeQueue deletes in-flight messages a worker already holds along
- *   with waiting ones, and keeps deleting messages sent during the
- *   up-to-60-second window it takes to finish — so it destroys both a
- *   reservation somebody owns and work pushed after the call. It
- *   reports no count, and is rate-limited to once per 60 seconds per
- *   queue.
- * - size() could not report what such a call removed even as an
- *   after-the-fact estimate: it excludes in-flight work by definition,
- *   and SQS's own numbers are approximate.
- * - Deleting only waiting messages cannot be assembled out of
- *   ReceiveMessage/DeleteMessage either — a delayed message is
- *   invisible until its DelaySeconds elapses, so nothing can receive it
- *   in order to delete it.
- *
- * Emptying an SQS queue is an infrastructure operation instead — `aws
- * sqs purge-queue`, or recreating the queue — like provisioning it in
- * the first place, which this backend also leaves to infrastructure. A
- * method here would have to promise less than PurgeQueue delivers or
- * more than this backend can, so there is none.
+ * ClearableQueueInterface is not implemented and PurgeQueue is never
+ * called: SQS offers no operation matching that contract. PurgeQueue
+ * deletes in-flight messages a worker already holds along with waiting
+ * ones, keeps deleting messages sent during the up-to-60-second window
+ * it takes to finish, reports no count, and is rate-limited to once per
+ * minute per queue. Deleting only waiting messages cannot be assembled
+ * out of ReceiveMessage/DeleteMessage either, since a delayed message is
+ * invisible until its delay elapses. Emptying an SQS queue is an
+ * infrastructure operation — `aws sqs purge-queue`, or recreating the
+ * queue.
  */
 final class SqsQueue implements QueueInterface
 {
     private const MAX_DELAY_SECONDS = 900;
 
-    private const MAX_WAIT_TIME_SECONDS = 20;
-
-    private const PER_QUEUE_WAIT_TIME_SECONDS = 5;
+    /**
+     * The longest pop() long-polls the highest-priority queue when
+     * nothing is waiting anywhere. Well under SQS's own 20-second
+     * maximum, so a lower-priority queue is re-checked promptly.
+     */
+    private const int BLOCK_WAIT_TIME_SECONDS = 5;
 
     private const MAX_ATTEMPTS_ATTRIBUTE = 'maxAttempts';
 
@@ -203,32 +172,55 @@ final class SqsQueue implements QueueInterface
     #[\Override]
     public function pop(int $timeoutSeconds = 0, array $queues = ['default']): ?QueuedJob
     {
-        // PopSweep::run() itself validates $timeoutSeconds/$queues via
-        // QueueContract before touching either — see that class's own
-        // docblock for why it doesn't trust a caller to have already
-        // done so.
-        return PopSweep::run(
-            timeoutSeconds: $timeoutSeconds,
-            queues: $queues,
-            probe: function (string $queue, float $waitSeconds): ?QueuedJob {
-                // WaitTimeSeconds: 0 is a genuine, correct immediate,
-                // non-blocking ReceiveMessage on SQS (unlike Redis's
-                // BRPOPLPUSH, where a literal 0 timeout means "block
-                // forever") — so PopSweep's own zero-wait immediate
-                // sweep, and a sub-one-second remaining budget (SQS's
-                // WaitTimeSeconds has no fractional form), both map onto
-                // it directly rather than needing a separate
-                // non-blocking primitive the way Redis does.
-                $waitTimeSeconds = $waitSeconds < 1.0 ? 0 : min(self::MAX_WAIT_TIME_SECONDS, (int) floor($waitSeconds));
+        QueueContract::assertValidPopArguments($timeoutSeconds, $queues);
 
-                return $this->receiveFrom($queue, $waitTimeSeconds);
-            },
-            probeCanBlock: true,
-            waitCapSeconds: (float) self::PER_QUEUE_WAIT_TIME_SECONDS,
-            sleep: static function (): never {
-                throw new LogicException('SqsQueue never paces via sleep() — every probe either long-polls natively or is instant.');
-            },
-        );
+        if ($queues === []) {
+            return null;
+        }
+
+        $deadline = $timeoutSeconds > 0 ? microtime(true) + $timeoutSeconds : null;
+
+        while (true) {
+            foreach ($queues as $queue) {
+                $job = $this->receiveFrom($queue, waitTimeSeconds: 0);
+
+                if ($job !== null) {
+                    return $job;
+                }
+            }
+
+            if ($deadline !== null && microtime(true) >= $deadline) {
+                return null;
+            }
+
+            // Nothing waiting anywhere, so long-poll the highest-priority
+            // queue rather than spinning. The lower-priority queues are
+            // re-checked on the next sweep. The wait is capped by what is
+            // left of the deadline, rounded up to a whole second:
+            // WaitTimeSeconds counts whole seconds, and 0 would make the
+            // receive non-blocking again.
+            $waitTimeSeconds = self::BLOCK_WAIT_TIME_SECONDS;
+
+            if ($deadline !== null) {
+                $waitTimeSeconds = max(1, min($waitTimeSeconds, (int) ceil($deadline - microtime(true))));
+            }
+
+            $job = $this->receiveFrom($queues[0], $waitTimeSeconds);
+
+            if ($job !== null) {
+                return $job;
+            }
+
+            // That long poll can consume the rest of the deadline on its
+            // own. Rechecking here, rather than only at the top of the
+            // next sweep, keeps an expired deadline from reserving a
+            // message the caller has already stopped waiting for — one
+            // that would then sit invisible until its visibility timeout
+            // expired.
+            if ($deadline !== null && microtime(true) >= $deadline) {
+                return null;
+            }
+        }
     }
 
     #[\Override]
@@ -334,33 +326,22 @@ final class SqsQueue implements QueueInterface
     }
 
     /**
-     * Extracted out of receiveFrom() and taking plain scalars rather than
-     * AsyncAws's own Message/MessageAttributeValue objects specifically so
-     * it's independently testable with hand-built strings, no real SQS
-     * round trip needed. Every field is read through one of QueueContract's
-     * own coercion helpers rather than trusted at a PHPStan-asserted @var
-     * shape — $body might not even be valid JSON, or might decode to
-     * something other than a {class, args} object; $rawMaxAttempts is read
-     * through QueueContract::coerceStoredMaxAttempts() rather than a lossy
-     * `(int)` cast — every SQS attribute value here is *already* a string
-     * by the API's own design ("Number" is a DataType label, not a
-     * distinct wire type), so a non-numeric one cast that way would
-     * silently become 0 instead of surfacing the corruption it actually
-     * represents. $rawReceiveCount is nullable and *not* defaulted to "1"
-     * here or by receiveFrom(): ApproximateReceiveCount is explicitly
-     * requested on every ReceiveMessage call as this backend's own
-     * required attempt counter, so its genuine absence from the response
-     * is a malformed message, not evidence of a first attempt — treating
-     * it as "1" would silently accept a corrupted or non-conformant
-     * response as ordinary. Read through coerceStoredAttempts(), not
-     * coerceStoredCompletedAttempts() (used by RedisQueue's/SqlQueue's/
-     * RabbitMqQueue's own equivalent decode methods): unlike those three,
-     * this value is never incremented — SQS's own ApproximateReceiveCount
-     * is already 1-indexed — so the bound checked is QueuedJob's own
-     * floor (>= 1) directly, not "must not be negative" (>= 0). Every
-     * failure here is caught by receiveFrom() — see
-     * QueueContract::settleIfMalformed() — so a malformed message settles
-     * the already-reserved receive rather than crashing the worker.
+     * Takes plain scalars rather than AsyncAws's Message objects so it is
+     * testable with hand-built strings, no SQS round trip needed.
+     *
+     * Every field goes through a QueueContract helper. Every SQS
+     * attribute value is a string by the API's design ("Number" is a
+     * DataType label, not a wire type), so a `(int)` cast would turn a
+     * corrupted one into 0 rather than surfacing it. $rawReceiveCount is
+     * not defaulted to 1: ApproximateReceiveCount is requested on every
+     * ReceiveMessage call as this backend's attempt counter, so its
+     * absence is a malformed message rather than evidence of a first
+     * attempt. Unlike the backends that store a completed-attempts count,
+     * it is already 1-indexed and never incremented, so the floor checked
+     * is QueuedJob's own. Every failure here is caught by receiveFrom()
+     * through QueueContract::settleIfMalformed(), so a malformed message
+     * settles the already-reserved receive instead of crashing the
+     * worker.
      */
     private static function buildQueuedJob(
         string $queue,
@@ -370,11 +351,11 @@ final class SqsQueue implements QueueInterface
         ?string $rawReceiveCount,
         ?string $rawMetadata,
     ): QueuedJob {
-        $decoded = QueueContract::coerceStoredJsonArray($body, 'body');
+        $decoded = QueueContract::storedJsonArray($body, 'body');
 
-        $class = QueueContract::coerceStoredClass($decoded['class'] ?? null);
-        $args = QueueContract::coerceStoredArgs($decoded['args'] ?? null);
-        $metadata = QueueContract::coerceStoredMetadata($rawMetadata);
+        $class = QueueContract::storedClass($decoded['class'] ?? null);
+        $args = QueueContract::storedArgs($decoded['args'] ?? null);
+        $metadata = QueueContract::storedMetadata($rawMetadata);
 
         if ($rawReceiveCount === null) {
             throw MalformedQueuedJobDataException::missingField('ApproximateReceiveCount');
@@ -385,21 +366,16 @@ final class SqsQueue implements QueueInterface
             $args,
             handle: $receiptHandle,
             queue: $queue,
-            attempts: QueueContract::coerceStoredAttempts($rawReceiveCount, 'ApproximateReceiveCount'),
-            maxAttempts: QueueContract::coerceStoredMaxAttempts($rawMaxAttempts, 'maxAttempts'),
+            attempts: QueueContract::storedInt($rawReceiveCount, 'ApproximateReceiveCount', 1),
+            maxAttempts: QueueContract::storedNullableInt($rawMaxAttempts, 'maxAttempts', 0),
             metadata: $metadata,
         );
     }
 
     /**
-     * The one choke point every real SQS operation (push, pop's own
-     * probe, size) reaches this backend's storage through — validating
-     * $queue here, not separately in each of those, is what closes
-     * size() having had no validation of its own at all. push()/pop()
-     * each also validate independently, ahead of this (push() before
-     * building anything else; pop() via PopSweep before touching any
-     * queue) — redundant for those two specifically, but this is the
-     * one call every path actually shares.
+     * The one call every SQS operation reaches storage through, so
+     * validating $queue here covers size() as well as push() and pop(),
+     * which each validate ahead of this on their own.
      */
     private function resolveQueueUrl(string $queue): string
     {
@@ -412,7 +388,7 @@ final class SqsQueue implements QueueInterface
         $resolvedName = $this->queueNamePrefix . $queue;
 
         if (\strlen($resolvedName) > self::MAX_RESOLVED_NAME_LENGTH) {
-            throw InvalidQueueNameException::resolvedNameTooLong($resolvedName, self::MAX_RESOLVED_NAME_LENGTH);
+            throw InvalidQueueArgumentException::resolvedNameTooLong($resolvedName, self::MAX_RESOLVED_NAME_LENGTH);
         }
 
         $url = $this->client->getQueueUrl(['QueueName' => $resolvedName])->getQueueUrl()
