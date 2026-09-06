@@ -13,6 +13,7 @@
         "kinetis/framework": "dev-main",
         "kinetis/queue": "dev-main",
         "kinetis/revolt-http-client": "dev-main",
+        "async-aws/core": "^1.29.2",
         "async-aws/sqs": "^2.9.0"
     },
     "require-dev": {

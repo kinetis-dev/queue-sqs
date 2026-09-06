@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "493cf29718b96424c061fef92905b4a0",
+    "content-hash": "8e849aead0941e080a58542efe956a49",
     "packages": [
         {
             "name": "amphp/amp",
@@ -1396,11 +1396,12 @@
             "dist": {
                 "type": "path",
                 "url": "../revolt-http-client",
-                "reference": "51fcea623759ee586d001d30c008d852478cf4d2"
+                "reference": "ba276d0e8aaea2be29fcd45f1787443c3db73142"
             },
             "require": {
                 "amphp/http-client": "^5.3.6",
                 "php": "^8.4",
+                "revolt/event-loop": "^1.0.9",
                 "symfony/http-client": "^8.1.4",
                 "symfony/http-client-contracts": "^3.7.1"
             },

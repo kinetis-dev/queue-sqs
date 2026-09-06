@@ -74,11 +74,16 @@ All three are scoped — `QUEUE_SQS_REGION` + `reports` →
 package; full reference:
 [kinetis.dev/docs/config.html](https://kinetis.dev/docs/config.html).
 
-Credentials are never read from Kinetis config — AsyncAws's own default
-credential provider chain (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, or
-an IAM role) resolves them. A `push()`/`pop()` queue name resolves
-directly to an SQS queue of that name — create it ahead of time; this
-package never creates one automatically.
+Credentials are never read from Kinetis config — AsyncAws's standard
+provider chain resolves them on its own, the usual AWS SDK convention.
+Every provider in that chain that calls AWS uses the same Revolt
+transport as the client, while the shared credentials and config files
+and any token file are read with native blocking calls. Full detail:
+[kinetis.dev/docs/queue-sqs.html](https://kinetis.dev/docs/queue-sqs.html).
+
+A `push()`/`pop()` queue name resolves directly to an SQS queue of that
+name — create it ahead of time; this package never creates one
+automatically.
 
 ## Installation
 
