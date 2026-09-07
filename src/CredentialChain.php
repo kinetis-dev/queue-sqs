@@ -40,6 +40,7 @@ final class CredentialChain implements CredentialProvider
         $this->providers = array_values($providers);
     }
 
+    #[\Override]
     public function getCredentials(Configuration $configuration): ?Credentials
     {
         if ($this->held !== null && !$this->held->isExpired()) {
