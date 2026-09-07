@@ -26,7 +26,7 @@ use Throwable;
  * silently clamped) and at-least-once delivery (a received message stays
  * invisible rather than deleted for its queue's visibility timeout, so
  * ack()/release()/fail() are DeleteMessage and ChangeMessageVisibility
- * calls with no processing list or reserved_at column to maintain).
+ * calls with no lease set or reserved_at column to maintain).
  *
  * $attempts comes from SQS's own ApproximateReceiveCount system
  * attribute. AWS documents that count as approximate under rare failure
