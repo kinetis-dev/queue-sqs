@@ -42,6 +42,9 @@ final readonly class SqsIntegrationTestJob implements Job
 $config = new Config([
     'QUEUE_SQS_REGION' => getenv('AWS_REGION') ?: 'us-east-1',
     'QUEUE_SQS_ENDPOINT' => getenv('LOCALSTACK_ENDPOINT') ?: 'http://127.0.0.1:4566',
+    // LocalStack answers plain HTTP, which the factory accepts only when
+    // the deployment says so.
+    'QUEUE_SQS_PLAINTEXT' => 'true',
 ]);
 
 $client = SqsClientFactory::fromConfig($config);

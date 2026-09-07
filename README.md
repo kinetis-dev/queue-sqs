@@ -65,20 +65,35 @@ QUEUE_SQS_REGION=us-east-1
 | Key | Default | Purpose |
 |---|---|---|
 | `QUEUE_SQS_REGION` | *(required)* | AWS region. |
-| `QUEUE_SQS_ENDPOINT` | — | SQS-compatible endpoint (e.g. LocalStack). |
+| `QUEUE_SQS_ENDPOINT` | — | SQS-compatible endpoint (e.g. LocalStack). One origin, nothing else. |
+| `QUEUE_SQS_PLAINTEXT` | `false` | Allows an `http://` value for `QUEUE_SQS_ENDPOINT`. |
+| `QUEUE_SQS_TIMEOUT` | `30` | Seconds bounding each SQS request and each credential lookup. |
 | `QUEUE_SQS_QUEUE_PREFIX` | — | Prepended to every queue name — for shared AWS accounts. |
 
-All three are scoped — `QUEUE_SQS_REGION` + `reports` →
+All five are scoped — `QUEUE_SQS_REGION` + `reports` →
 `QUEUE_REPORTS_SQS_REGION`. [`kinetis/queue`](https://github.com/kinetis-dev/queue)'s own keys
 (`QUEUE_CONNECTION`, `QUEUE_MAX_ATTEMPTS`, ...) are documented in that
 package; full reference:
 [kinetis.dev/docs/config.html](https://kinetis.dev/docs/config.html).
 
+`QUEUE_SQS_ENDPOINT` is a scheme, a host and an optional port, with no
+userinfo, path, query or fragment. Without it the destination is
+AsyncAws's regional endpoint table, and an `AWS_ENDPOINT_URL` sitting in
+the environment for some other tool is refused rather than quietly
+redirecting signed requests. `QUEUE_SQS_TIMEOUT` bounds each request on
+its own, not a whole `pop()`. Any positive value is accepted; set it
+above the longest long poll the application issues — at most a
+five-second slice, and shorter whenever a `pop()` deadline caps it —
+which the default of `30` already covers.
+
 Credentials are never read from Kinetis config — AsyncAws's standard
 provider chain resolves them on its own, the usual AWS SDK convention.
 Every provider in that chain that calls AWS uses the same Revolt
 transport as the client, while the shared credentials and config files
-and any token file are read with native blocking calls. Full detail:
+and any token file are read with native blocking calls. Resolved
+credentials are held only while unexpired, and a lookup that resolved
+nothing is retried on the next queue operation rather than remembered.
+Full detail:
 [kinetis.dev/docs/queue-sqs.html](https://kinetis.dev/docs/queue-sqs.html).
 
 A `push()`/`pop()` queue name resolves directly to an SQS queue of that

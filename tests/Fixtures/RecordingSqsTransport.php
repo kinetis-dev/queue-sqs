@@ -22,6 +22,11 @@ use Symfony\Contracts\HttpClient\HttpClientInterface;
  * one entry per call with the last entry answering every call after it
  * — which is what lets a test hand out a distinct delivery per receive.
  *
+ * An entry can also be a factory for a MockResponse rather than a body,
+ * which is how a test scripts an SQS error status or a transport failure.
+ * A factory rather than a MockResponse because a response is consumed by
+ * the call it answers, and the last entry answers every call after it.
+ *
  * A long-polling ReceiveMessage can also be given a duration, the way
  * SQS itself holds one open. A reply that arrives instantly cannot
  * exercise a pop() deadline that the long poll consumed.
@@ -40,17 +45,17 @@ final class RecordingSqsTransport
      */
     public array $requests = [];
 
-    /** @var array<string, list<string>> */
+    /** @var array<string, list<string|callable(): MockResponse>> */
     private array $responses;
 
     /** @var array<string, int> */
     private array $calls = [];
 
     /**
-     * @param array<string, string|list<string>> $responses JSON body per
-     *     operation name; an operation with no entry answers with an
-     *     empty object, which is what SQS returns for DeleteMessage and
-     *     ChangeMessageVisibility
+     * @param array<string, string|callable(): MockResponse|list<string|callable(): MockResponse>> $responses
+     *     JSON body (or MockResponse factory) per operation name; an
+     *     operation with no entry answers with an empty object, which is
+     *     what SQS returns for DeleteMessage and ChangeMessageVisibility
      * @param int $longPollMicroseconds how long a ReceiveMessage
      *     carrying a non-zero WaitTimeSeconds takes to answer; 0 answers
      *     every call at once
@@ -58,7 +63,7 @@ final class RecordingSqsTransport
     public function __construct(array $responses = [], private readonly int $longPollMicroseconds = 0)
     {
         $this->responses = array_map(
-            static fn (string|array $bodies): array => \is_array($bodies) ? $bodies : [$bodies],
+            static fn (string|callable|array $bodies): array => \is_array($bodies) ? $bodies : [$bodies],
             $responses,
         );
     }
@@ -75,14 +80,23 @@ final class RecordingSqsTransport
                 usleep($this->longPollMicroseconds);
             }
 
+            $body = $this->bodyFor($operation);
+
+            if (!\is_string($body)) {
+                return $body();
+            }
+
             return new MockResponse(
-                $this->bodyFor($operation),
+                $body,
                 ['response_headers' => ['content-type' => 'application/x-amz-json-1.0']],
             );
         });
     }
 
-    private function bodyFor(string $operation): string
+    /**
+     * @return string|callable(): MockResponse
+     */
+    private function bodyFor(string $operation): string|callable
     {
         $bodies = $this->responses[$operation] ?? [];
 

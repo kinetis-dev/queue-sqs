@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Kinetis\QueueSqs\Tests;
 
 use AsyncAws\Core\Credentials\NullProvider;
+use AsyncAws\Core\Exception\Http\NetworkException;
+use AsyncAws\Core\Exception\Http\ServerException;
 use AsyncAws\Sqs\SqsClient;
 use InvalidArgumentException;
 use Kinetis\Config\Config;
@@ -23,6 +25,8 @@ use Kinetis\QueueSqs\Tests\Fixtures\RecordingSqsTransport;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use ReflectionMethod;
+use Symfony\Component\HttpClient\Response\MockResponse;
+use Throwable;
 
 /**
  * Queue-name validation and this backend's declared capabilities —
@@ -505,6 +509,168 @@ final class SqsQueueTest extends TestCase
 
         self::assertNotNull($queue->pop(timeoutSeconds: 300));
         self::assertSame([0, 5, 0], self::waitTimes($transport));
+    }
+
+    /**
+     * SendMessage, ChangeMessageVisibility and DeleteMessage each report
+     * nothing a caller reads, so the only thing that makes SQS's answer
+     * to one observable is resolving it. These drive the three settling
+     * paths against a transport that fails, and read back both the
+     * exception the public method raised and the operation that produced
+     * it — a failure the operation swallowed would leave the method
+     * returning normally with the request recorded.
+     */
+    public function test_push_surfaces_a_service_failure_from_the_send(): void
+    {
+        $transport = new RecordingSqsTransport([
+            'GetQueueUrl' => self::queueUrlResponse(),
+            'SendMessage' => self::serviceFailure(),
+        ]);
+
+        $failure = self::failureFrom(
+            fn () => self::queueOn($transport)->push(new RecordedJob()),
+        );
+
+        self::assertInstanceOf(ServerException::class, $failure);
+        self::assertSame(['GetQueueUrl', 'SendMessage'], $transport->operations);
+    }
+
+    public function test_push_surfaces_a_network_failure_from_the_send(): void
+    {
+        $transport = new RecordingSqsTransport([
+            'GetQueueUrl' => self::queueUrlResponse(),
+            'SendMessage' => self::networkFailure(),
+        ]);
+
+        $failure = self::failureFrom(
+            fn () => self::queueOn($transport)->push(new RecordedJob()),
+        );
+
+        self::assertInstanceOf(NetworkException::class, $failure);
+        self::assertSame(['GetQueueUrl', 'SendMessage'], $transport->operations);
+    }
+
+    public function test_release_surfaces_a_service_failure_from_the_visibility_change(): void
+    {
+        $transport = new RecordingSqsTransport([
+            'GetQueueUrl' => self::queueUrlResponse(),
+            'ChangeMessageVisibility' => self::serviceFailure(),
+        ]);
+
+        $failure = self::failureFrom(
+            fn () => self::queueOn($transport)->release(self::reserved()),
+        );
+
+        self::assertInstanceOf(ServerException::class, $failure);
+        self::assertSame(['GetQueueUrl', 'ChangeMessageVisibility'], $transport->operations);
+    }
+
+    /**
+     * @return list<array{string}>
+     */
+    public static function deletingSettlements(): array
+    {
+        return ['ack' => ['ack'], 'fail' => ['fail']];
+    }
+
+    /**
+     * ack() and fail() are the same DeleteMessage reached from two public
+     * methods, so both have to report what that one call answers.
+     */
+    #[DataProvider('deletingSettlements')]
+    public function test_the_shared_deletion_surfaces_a_service_failure(string $settlement): void
+    {
+        $transport = new RecordingSqsTransport([
+            'GetQueueUrl' => self::queueUrlResponse(),
+            'DeleteMessage' => self::serviceFailure(),
+        ]);
+
+        $failure = self::failureFrom(
+            fn () => self::queueOn($transport)->{$settlement}(self::reserved()),
+        );
+
+        self::assertInstanceOf(ServerException::class, $failure);
+        self::assertSame(['GetQueueUrl', 'DeleteMessage'], $transport->operations);
+    }
+
+    #[DataProvider('deletingSettlements')]
+    public function test_the_shared_deletion_surfaces_a_network_failure(string $settlement): void
+    {
+        $transport = new RecordingSqsTransport([
+            'GetQueueUrl' => self::queueUrlResponse(),
+            'DeleteMessage' => self::networkFailure(),
+        ]);
+
+        $failure = self::failureFrom(
+            fn () => self::queueOn($transport)->{$settlement}(self::reserved()),
+        );
+
+        self::assertInstanceOf(NetworkException::class, $failure);
+        self::assertSame(['GetQueueUrl', 'DeleteMessage'], $transport->operations);
+    }
+
+    private static function queueOn(RecordingSqsTransport $transport): SqsQueue
+    {
+        return new SqsQueue(new SqsClient(['region' => 'us-east-1'], new NullProvider(), $transport->client()));
+    }
+
+    /**
+     * A delivery a settlement can be driven against without a receive
+     * first, so the recorded operations are the settlement's own.
+     */
+    private static function reserved(): QueuedJob
+    {
+        return new QueuedJob(
+            RecordedJob::class,
+            [],
+            handle: 'receipt-handle',
+            queue: 'default',
+            attempts: 1,
+        );
+    }
+
+    /**
+     * Catching Throwable rather than the expected class is what makes the
+     * assertion that follows a real one: a method that raised nothing
+     * returns null here, and one that raised something else fails on the
+     * type rather than passing on a bare expectException().
+     */
+    private static function failureFrom(callable $operation): ?Throwable
+    {
+        try {
+            $operation();
+        } catch (Throwable $e) {
+            return $e;
+        }
+
+        return null;
+    }
+
+    /**
+     * SQS answering with its own error shape under a 5xx status — an
+     * internal failure, or a request it refused outright.
+     *
+     * @return callable(): MockResponse
+     */
+    private static function serviceFailure(): callable
+    {
+        return static fn (): MockResponse => new MockResponse(
+            self::json(['__type' => 'com.amazonaws.sqs#InternalError', 'message' => 'We encountered an internal error.']),
+            [
+                'http_code' => 500,
+                'response_headers' => ['content-type' => 'application/x-amz-json-1.0'],
+            ],
+        );
+    }
+
+    /**
+     * The connection failing rather than SQS answering at all.
+     *
+     * @return callable(): MockResponse
+     */
+    private static function networkFailure(): callable
+    {
+        return static fn (): MockResponse => new MockResponse('', ['error' => 'connection reset by peer']);
     }
 
     /**

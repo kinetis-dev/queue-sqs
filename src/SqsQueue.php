@@ -54,6 +54,14 @@ use Throwable;
  * top-level code with no existing Fiber, so no Timer or concurrently()
  * wrapper is needed.
  *
+ * Every mutation resolves at its call site. SendMessage, DeleteMessage
+ * and ChangeMessageVisibility each answer with a Result whose request is
+ * only known to have reached SQS once it is resolved, and each of those
+ * three operations reports nothing else a caller reads, so resolve() is
+ * what turns a service or network failure into the failure of the queue
+ * operation itself rather than of a temporary being destroyed. The read
+ * paths resolve through the getters they already call.
+ *
  * **Settlements here are unfenced.** QueuedJob::$handle is the message's
  * ReceiptHandle, which SQS scopes to the receive that produced it, but
  * this backend raises no Exception\StaleJobHandleException of its own:
@@ -160,7 +168,7 @@ final class SqsQueue implements QueueInterface
                 $input['MessageAttributes'] = $attributes;
             }
 
-            $this->client->sendMessage($input);
+            $this->client->sendMessage($input)->resolve();
             $telemetry->jobPushEnded($telemetryToken, null);
         } catch (Throwable $e) {
             $telemetry->jobPushEnded($telemetryToken, $e);
@@ -241,7 +249,7 @@ final class SqsQueue implements QueueInterface
             'QueueUrl' => $this->resolveQueueUrl($job->queue),
             'ReceiptHandle' => (string) $job->handle,
             'VisibilityTimeout' => 0,
-        ]);
+        ])->resolve();
     }
 
     #[\Override]
@@ -262,7 +270,7 @@ final class SqsQueue implements QueueInterface
         $this->client->deleteMessage([
             'QueueUrl' => $this->resolveQueueUrl($queue),
             'ReceiptHandle' => $receiptHandle,
-        ]);
+        ])->resolve();
     }
 
     /**
