@@ -28,6 +28,15 @@ use Throwable;
  * ack()/release()/fail() are DeleteMessage and ChangeMessageVisibility
  * calls with no lease set or reserved_at column to maintain).
  *
+ * A delayed release() is that same native invisibility: release()'s
+ * $delaySeconds is passed straight through as ChangeMessageVisibility's
+ * VisibilityTimeout, whose request field accepts 0 to 43200 seconds — a
+ * wider limit than DelaySeconds, and this backend raises against it
+ * separately. Being in range is not the same as being accepted: SQS
+ * refuses a timeout longer than the time left in that received
+ * message's own 12-hour maximum, and that refusal propagates. See
+ * release().
+ *
  * $attempts comes from SQS's own ApproximateReceiveCount system
  * attribute. AWS documents that count as approximate under rare failure
  * conditions — a disclosed imprecision, not an exact counter.
@@ -84,6 +93,20 @@ use Throwable;
 final class SqsQueue implements QueueInterface
 {
     private const MAX_DELAY_SECONDS = 900;
+
+    /**
+     * The widest VisibilityTimeout ChangeMessageVisibility's request
+     * field accepts — 0 to 43200 seconds, 12 hours — a different and far
+     * wider limit than SendMessage's 900-second DelaySeconds, because it
+     * re-times an existing message's invisibility rather than scheduling
+     * a new delivery. Raised against here rather than silently clamped,
+     * the same stance MAX_DELAY_SECONDS takes.
+     *
+     * A field cap, not a promise that everything under it is accepted:
+     * how much of a received message's own 12-hour maximum is left is
+     * service state only SQS knows. See release().
+     */
+    private const int MAX_RELEASE_DELAY_SECONDS = 43200;
 
     /**
      * The longest pop() long-polls the highest-priority queue when
@@ -237,18 +260,45 @@ final class SqsQueue implements QueueInterface
         $this->deleteMessage($job->queue, (string) $job->handle);
     }
 
+    /**
+     * $delaySeconds *is* the new VisibilityTimeout. Nothing is
+     * republished and no delay structure is needed — this is the same
+     * single request the immediate release already made, carrying the
+     * delay the worker asked for. On a call SQS accepts, the new timeout
+     * counts from the call, so 0 makes the message visible again at once
+     * rather than waiting out its queue's normal visibility timeout.
+     *
+     * Two separate limits apply, and only the first is this backend's to
+     * enforce:
+     *
+     * - The request field accepts 0 to 43200 seconds. That is a property
+     *   of the API, knowable before the call, so an over-range value is
+     *   rejected here rather than sent.
+     * - SQS additionally refuses a timeout longer than the time left in
+     *   this received message's own 12-hour maximum, and documents that
+     *   it does not recalculate down to that remaining time. How much is
+     *   left is service state this process cannot see, so an in-range
+     *   delay is a request SQS may still refuse. That refusal propagates
+     *   as SQS's own error, like every other settlement failure here,
+     *   with nothing settled — which is why there is no local guess at
+     *   the remaining window.
+     */
     #[\Override]
-    public function release(QueuedJob $job): void
+    public function release(QueuedJob $job, int $delaySeconds = 0): void
     {
-        // VisibilityTimeout: 0 makes the message visible again immediately
-        // rather than waiting out its queue's normal visibility timeout —
-        // the same "available for retry right away" intent RedisQueue's
-        // pushHead()-back-onto-pending and SqlQueue's reserved_at = NULL
-        // both give.
+        QueueContract::assertValidReleaseDelay($delaySeconds);
+
+        if ($delaySeconds > self::MAX_RELEASE_DELAY_SECONDS) {
+            throw new InvalidArgumentException(
+                'ChangeMessageVisibility accepts a VisibilityTimeout of at most '
+                . self::MAX_RELEASE_DELAY_SECONDS . " seconds (requested {$delaySeconds}).",
+            );
+        }
+
         $this->client->changeMessageVisibility([
             'QueueUrl' => $this->resolveQueueUrl($job->queue),
             'ReceiptHandle' => (string) $job->handle,
-            'VisibilityTimeout' => 0,
+            'VisibilityTimeout' => $delaySeconds,
         ])->resolve();
     }
 

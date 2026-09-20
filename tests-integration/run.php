@@ -73,6 +73,20 @@ check('released job comes back with attempts incremented', $second?->attempts ==
 check('maxAttempts round-trips through the message attribute', $second?->maxAttempts === 3);
 $queue->ack($second);
 
+// A delayed release is SQS's own visibility timeout, counted from the
+// call: only a real endpoint proves the message is actually held. Three
+// seconds on a freshly received message is well inside the 12 hours it
+// has left, so this exercises the delay rather than SQS's own
+// remaining-time refusal.
+$queue->push(new SqsIntegrationTestJob('back-off'), maxAttempts: 3);
+$delayed = $queue->pop(timeoutSeconds: 10);
+$queue->release($delayed, 3);
+check('a delayed release stays invisible while the delay runs', $queue->pop(timeoutSeconds: 1) === null);
+$retried = $queue->pop(timeoutSeconds: 15);
+check('the delayed job becomes visible once its delay has run', $retried?->args['message'] === 'back-off');
+check('the delayed retry still carries its incremented attempt', $retried?->attempts === 2);
+$queue->ack($retried);
+
 // fail() removes the job permanently.
 $queue->push(new SqsIntegrationTestJob('doomed'));
 $doomed = $queue->pop(timeoutSeconds: 10);

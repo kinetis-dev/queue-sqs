@@ -550,6 +550,76 @@ final class SqsQueueTest extends TestCase
         self::assertSame(['GetQueueUrl', 'SendMessage'], $transport->operations);
     }
 
+    /**
+     * @return list<array{int}>
+     */
+    public static function releaseDelays(): array
+    {
+        return [
+            'immediate' => [0],
+            'a short backoff' => [120],
+            "the request field's own maximum" => [43200],
+        ];
+    }
+
+    /**
+     * The delay *is* the new VisibilityTimeout: nothing is republished,
+     * and the one request the immediate release already made carries the
+     * backoff unchanged. Asserted over the real request body rather than
+     * the operation name, since a backend that sent 0 regardless would
+     * record an identical operation list.
+     *
+     * What reaches the wire is all this can settle. Whether SQS accepts
+     * a given in-range timeout depends on the time left in that
+     * message's own 12-hour maximum, which is service state; a refusal
+     * propagates as SQS's own error — see
+     * test_release_surfaces_a_service_failure_from_the_visibility_change().
+     */
+    #[DataProvider('releaseDelays')]
+    public function test_release_sends_the_requested_delay_as_the_visibility_timeout(int $delaySeconds): void
+    {
+        $transport = new RecordingSqsTransport(['GetQueueUrl' => self::queueUrlResponse()]);
+
+        self::queueOn($transport)->release(self::reserved(), $delaySeconds);
+
+        self::assertSame(['GetQueueUrl', 'ChangeMessageVisibility'], $transport->operations);
+        self::assertSame($delaySeconds, $transport->requests[1]['VisibilityTimeout']);
+        self::assertSame('receipt-handle', $transport->requests[1]['ReceiptHandle']);
+    }
+
+    /**
+     * ChangeMessageVisibility's request field accepts 0 to 43200 — a far
+     * wider limit than SendMessage's 900-second DelaySeconds, and its
+     * own. The installed async-aws request object validates neither, so
+     * this check is what keeps an over-range value off the wire: nothing
+     * at all reaches the transport, not even the queue-URL lookup.
+     *
+     * The field's cap is the only one knowable locally, which is why it
+     * is the only one raised here.
+     */
+    public function test_release_rejects_a_delay_over_the_visibility_cap_before_any_transport(): void
+    {
+        $transport = new RecordingSqsTransport(['GetQueueUrl' => self::queueUrlResponse()]);
+        $queue = self::queueOn($transport);
+
+        $failure = self::failureFrom(fn () => $queue->release(self::reserved(), 43201));
+
+        self::assertInstanceOf(InvalidArgumentException::class, $failure);
+        self::assertStringContainsString('at most 43200 seconds', $failure->getMessage());
+        self::assertSame([], $transport->operations);
+    }
+
+    public function test_release_rejects_a_negative_delay_before_any_transport(): void
+    {
+        $transport = new RecordingSqsTransport(['GetQueueUrl' => self::queueUrlResponse()]);
+        $queue = self::queueOn($transport);
+
+        $failure = self::failureFrom(fn () => $queue->release(self::reserved(), -1));
+
+        self::assertInstanceOf(InvalidQueueArgumentException::class, $failure);
+        self::assertSame([], $transport->operations);
+    }
+
     public function test_release_surfaces_a_service_failure_from_the_visibility_change(): void
     {
         $transport = new RecordingSqsTransport([
