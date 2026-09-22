@@ -18,6 +18,7 @@ use Kinetis\Queue\Console\ClearCommand;
 use Kinetis\Queue\Job;
 use Kinetis\Queue\QueuedJob;
 use Kinetis\Queue\QueueInterface;
+use Kinetis\Queue\RenewableQueueInterface;
 use Kinetis\QueueSqs\SqsClientFactory;
 use Kinetis\QueueSqs\SqsQueue;
 use Kinetis\QueueSqs\Tests\Fixtures\RecordedJob;
@@ -679,9 +680,12 @@ final class SqsQueueTest extends TestCase
         self::assertSame(['GetQueueUrl', 'DeleteMessage'], $transport->operations);
     }
 
-    private static function queueOn(RecordingSqsTransport $transport): SqsQueue
+    private static function queueOn(RecordingSqsTransport $transport, int $visibilityTimeoutSeconds = 300): SqsQueue
     {
-        return new SqsQueue(new SqsClient(['region' => 'us-east-1'], new NullProvider(), $transport->client()));
+        return new SqsQueue(
+            new SqsClient(['region' => 'us-east-1'], new NullProvider(), $transport->client()),
+            visibilityTimeoutSeconds: $visibilityTimeoutSeconds,
+        );
     }
 
     /**
@@ -808,5 +812,101 @@ final class SqsQueueTest extends TestCase
         self::assertSame($expectedHandle, $job->handle);
 
         return $job;
+    }
+
+    /**
+     * @return list<array{int}>
+     */
+    public static function rejectedVisibilityTimeouts(): array
+    {
+        return ['zero is a release, not a reservation' => [0], 'past the request field cap' => [43201]];
+    }
+
+    #[DataProvider('rejectedVisibilityTimeouts')]
+    public function test_a_visibility_timeout_outside_the_admitted_range_is_rejected_at_construction(int $seconds): void
+    {
+        $transport = new RecordingSqsTransport(['GetQueueUrl' => self::queueUrlResponse()]);
+
+        $failure = self::failureFrom(static fn () => self::queueOn($transport, $seconds));
+
+        self::assertInstanceOf(InvalidArgumentException::class, $failure);
+        self::assertStringContainsString('between 1 and 43200 seconds', $failure->getMessage());
+        self::assertSame([], $transport->operations);
+    }
+
+    public function test_the_configured_window_is_what_the_renewal_capability_reports(): void
+    {
+        $queue = self::queueOn(new RecordingSqsTransport(), 900);
+
+        self::assertInstanceOf(RenewableQueueInterface::class, $queue);
+        self::assertSame(900, $queue->visibilityTimeoutSeconds());
+    }
+
+    /**
+     * The application's setting, not the remote queue's attribute,
+     * decides how long a delivery this worker takes stays invisible —
+     * so the window the heartbeat renews is the window the receive
+     * asked for.
+     */
+    public function test_every_receive_asks_for_the_configured_visibility_timeout(): void
+    {
+        $transport = new RecordingSqsTransport([
+            'GetQueueUrl' => self::queueUrlResponse(),
+            'ReceiveMessage' => [self::emptyReceiveResponse(), self::receivedResponse('receipt-handle')],
+        ]);
+
+        self::popped(self::queueOn($transport, 900), 'receipt-handle');
+
+        $timeouts = [];
+
+        foreach ($transport->operations as $index => $operation) {
+            if ($operation === 'ReceiveMessage') {
+                $timeouts[] = $transport->requests[$index]['VisibilityTimeout'] ?? null;
+            }
+        }
+
+        self::assertNotSame([], $timeouts);
+        self::assertSame([900], array_values(array_unique($timeouts)), 'every receive, not only the first');
+    }
+
+    /**
+     * One ChangeMessageVisibility naming this receipt and restoring the
+     * full window — the same request field a delayed release() uses,
+     * which is exactly why QueueWorker joins an in-flight renewal before
+     * it settles anything.
+     */
+    public function test_renewing_re_times_this_receipt_to_the_full_window(): void
+    {
+        $transport = new RecordingSqsTransport(['GetQueueUrl' => self::queueUrlResponse()]);
+
+        self::queueOn($transport, 900)->renew(self::reserved());
+
+        self::assertSame(['GetQueueUrl', 'ChangeMessageVisibility'], $transport->operations);
+        self::assertSame(
+            [
+                'QueueUrl' => 'https://sqs.us-east-1.amazonaws.com/123456789012/default',
+                'ReceiptHandle' => 'receipt-handle',
+                'VisibilityTimeout' => 900,
+            ],
+            $transport->requests[1],
+        );
+    }
+
+    /**
+     * No stale-receipt detection is fabricated locally: whatever SQS
+     * answers a renewal with propagates, and QueueWorker is what
+     * contains it.
+     */
+    public function test_a_renewal_surfaces_a_service_failure_unchanged(): void
+    {
+        $transport = new RecordingSqsTransport([
+            'GetQueueUrl' => self::queueUrlResponse(),
+            'ChangeMessageVisibility' => self::serviceFailure(),
+        ]);
+
+        $failure = self::failureFrom(static fn () => self::queueOn($transport)->renew(self::reserved()));
+
+        self::assertInstanceOf(ServerException::class, $failure);
+        self::assertSame(['GetQueueUrl', 'ChangeMessageVisibility'], $transport->operations);
     }
 }

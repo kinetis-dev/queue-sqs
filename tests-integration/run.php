@@ -5,8 +5,8 @@ declare(strict_types=1);
 /**
  * Real-backend regression coverage for SqsQueue — push/pop/ack/release/
  * fail, attempt counting via SQS's own ApproximateReceiveCount, maxAttempts
- * round-tripping through a message attribute, and priority-queue
- * fallthrough — against a real LocalStack SQS endpoint. The queue itself
+ * round-tripping through a message attribute, reservation renewal, and
+ * priority-queue fallthrough — against a real LocalStack SQS endpoint. The queue itself
  * is never auto-created by SqsQueue (a deliberate design choice, not a
  * setup race to work around), so this script creates it directly first.
  */
@@ -49,7 +49,7 @@ $config = new Config([
 
 $client = SqsClientFactory::fromConfig($config);
 
-foreach (['default', 'high', 'empty-one', 'empty-two', 'empty-three', 'lowest'] as $queueName) {
+foreach (['default', 'high', 'empty-one', 'empty-two', 'empty-three', 'lowest', 'renewal'] as $queueName) {
     $client->createQueue(['QueueName' => $queueName])->resolve();
 }
 
@@ -98,6 +98,51 @@ $queue->push(new SqsIntegrationTestJob('no-max-attempts'));
 $noMax = $queue->pop(timeoutSeconds: 10);
 check('a job with no maxAttempts comes back null', $noMax?->maxAttempts === null);
 $queue->ack($noMax);
+
+// Reservation renewal against a real endpoint. A created queue carries
+// LocalStack's own 30-second default VisibilityTimeout, so the control
+// below coming back after eight seconds is also what proves the window
+// every ReceiveMessage sends overrides that attribute.
+//
+// Five seconds rather than two: each LocalStack call carries roughly a
+// real second of emulation overhead, so a two-second window would be
+// racing that overhead instead of the renewal.
+$renewable = new SqsQueue($client, visibilityTimeoutSeconds: 5);
+
+$renewable->push(new SqsIntegrationTestJob('expires-without-renewal'), queue: 'renewal');
+$abandoned = $renewable->pop(timeoutSeconds: 10, queues: ['renewal']);
+check('the renewal queue delivers its first job', $abandoned?->args['message'] === 'expires-without-renewal');
+sleep(8);
+$redelivered = $renewable->pop(timeoutSeconds: 10, queues: ['renewal']);
+check('an unrenewed delivery is redelivered once the sent window expires', $redelivered !== null);
+check('that redelivery is the second receive of the same message', $redelivered?->attempts === 2);
+$renewable->ack($redelivered);
+
+// The discriminator: two renewals spanning more than the whole window,
+// after which the message must still be invisible. Without renew(), this
+// is the control above.
+$renewable->push(new SqsIntegrationTestJob('outlives-its-window'), queue: 'renewal');
+$held = $renewable->pop(timeoutSeconds: 10, queues: ['renewal']);
+check('the job to be renewed was delivered', $held?->args['message'] === 'outlives-its-window');
+
+$receivedAt = microtime(true);
+
+for ($renewals = 0; $renewals < 2; $renewals++) {
+    sleep(3);
+    $renewable->renew($held);
+}
+
+$sinceReceive = microtime(true) - $receivedAt;
+check(
+    "more than one window has passed since the receive — {$sinceReceive}s against 5s",
+    $sinceReceive > 5.0,
+);
+check(
+    'a renewed delivery is still invisible past the window it was received with',
+    $renewable->pop(timeoutSeconds: 3, queues: ['renewal']) === null,
+);
+$renewable->ack($held);
+check('nothing is left on the renewal queue', $renewable->pop(timeoutSeconds: 3, queues: ['renewal']) === null);
 
 // Priority queues: the higher-priority queue is checked first.
 $queue->push(new SqsIntegrationTestJob('low-priority'), queue: 'default');

@@ -45,6 +45,15 @@ returns propagates as itself. SQS can also redeliver a message
 independently of anything this package does, so job handlers have to be
 idempotent.
 
+`SqsQueue` declares `Kinetis\Queue\RenewableQueueInterface`. Every
+`ReceiveMessage` sends `QUEUE_VISIBILITY_TIMEOUT_SECONDS` as the
+message's `VisibilityTimeout` — **overriding the queue's own attribute**
+for the messages this application takes — and `queue:work` restores that
+window with one `ChangeMessageVisibility` at half the interval while the
+job runs. AWS counts a message's own 12-hour maximum from the receive
+rather than from the last renewal, so a job running past it is
+redelivered whatever the worker sends.
+
 ```php
 use Kinetis\Config\Config;
 use Kinetis\QueueSqs\SqsClientFactory;
@@ -69,8 +78,9 @@ QUEUE_SQS_REGION=us-east-1
 | `QUEUE_SQS_PLAINTEXT` | `false` | Allows an `http://` value for `QUEUE_SQS_ENDPOINT`. |
 | `QUEUE_SQS_TIMEOUT` | `30` | Seconds bounding each SQS request and each credential lookup. |
 | `QUEUE_SQS_QUEUE_PREFIX` | — | Prepended to every queue name — for shared AWS accounts. |
+| `QUEUE_VISIBILITY_TIMEOUT_SECONDS` | `300` | Seconds a received message stays invisible, sent on every receive and restored by every renewal. `1` to `43200`, refused outside that range before a client is built. |
 
-All five are scoped — `QUEUE_SQS_REGION` + `reports` →
+All six are scoped — `QUEUE_SQS_REGION` + `reports` →
 `QUEUE_REPORTS_SQS_REGION`. [`kinetis/queue`](https://github.com/kinetis-dev/queue)'s own keys
 (`QUEUE_CONNECTION`, `QUEUE_MAX_ATTEMPTS`, ...) are documented in that
 package; full reference:

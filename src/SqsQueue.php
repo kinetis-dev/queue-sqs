@@ -14,8 +14,8 @@ use Kinetis\Queue\Exception\MalformedQueuedJobDataException;
 use Kinetis\Queue\Job;
 use Kinetis\Queue\JobSerializer;
 use Kinetis\Queue\QueueContract;
-use Kinetis\Queue\QueueInterface;
 use Kinetis\Queue\QueuedJob;
+use Kinetis\Queue\RenewableQueueInterface;
 use Kinetis\QueueSqs\Exception\SqsQueueException;
 use Throwable;
 
@@ -54,6 +54,18 @@ use Throwable;
  * own table. Standard queues only — FIFO queues, which require
  * MessageGroupId on every send, are not supported.
  *
+ * **Every ReceiveMessage carries an explicit VisibilityTimeout**, the
+ * $visibilityTimeoutSeconds this instance was built with, so the window
+ * a delivery gets is the application's setting rather than whatever the
+ * remote queue attribute happens to be — that attribute is overridden
+ * per receive. The same value is what renew() writes: this backend
+ * declares Kinetis\Queue\RenewableQueueInterface, and QueueWorker
+ * extends a delivery at half the window for as long as its handler
+ * runs. AWS caps the field at 43200 seconds and counts a message's own
+ * 12-hour maximum from the receive, not from the last renewal, so a job
+ * running past that limit is redelivered whatever this backend sends —
+ * and that refusal propagates as SQS's own error.
+ *
  * pop() sweeps every queue with an immediate ReceiveMessage first, then
  * long-polls the highest-priority queue for a bounded slice before
  * sweeping again — see QueueInterface for the contract. WaitTimeSeconds
@@ -90,23 +102,34 @@ use Throwable;
  * infrastructure operation — `aws sqs purge-queue`, or recreating the
  * queue.
  */
-final class SqsQueue implements QueueInterface
+final class SqsQueue implements RenewableQueueInterface
 {
     private const MAX_DELAY_SECONDS = 900;
 
     /**
-     * The widest VisibilityTimeout ChangeMessageVisibility's request
-     * field accepts — 0 to 43200 seconds, 12 hours — a different and far
-     * wider limit than SendMessage's 900-second DelaySeconds, because it
-     * re-times an existing message's invisibility rather than scheduling
-     * a new delivery. Raised against here rather than silently clamped,
-     * the same stance MAX_DELAY_SECONDS takes.
+     * The widest VisibilityTimeout SQS's request field accepts — 0 to
+     * 43200 seconds, 12 hours — a different and far wider limit than
+     * SendMessage's 900-second DelaySeconds, because it re-times an
+     * existing message's invisibility rather than scheduling a new
+     * delivery. One field and one cap for all three uses this backend
+     * makes of it: the window ReceiveMessage asks for, the window
+     * renew() restores, and the delay release() sets. Raised against
+     * here rather than silently clamped, the same stance
+     * MAX_DELAY_SECONDS takes.
      *
      * A field cap, not a promise that everything under it is accepted:
      * how much of a received message's own 12-hour maximum is left is
      * service state only SQS knows. See release().
      */
-    private const int MAX_RELEASE_DELAY_SECONDS = 43200;
+    private const int MAX_VISIBILITY_TIMEOUT_SECONDS = 43200;
+
+    /**
+     * The narrowest window a worker can be given. 1 rather than SQS's
+     * own 0, which means "visible again immediately" — a release, not a
+     * reservation a worker could hold and renew. It bounds only the
+     * reservation window; release() still admits 0.
+     */
+    private const int MIN_VISIBILITY_TIMEOUT_SECONDS = 1;
 
     /**
      * The longest pop() long-polls the highest-priority queue when
@@ -131,11 +154,35 @@ final class SqsQueue implements QueueInterface
     /** @var array<string, string> */
     private array $queueUrlsByName = [];
 
+    /**
+     * @param int $visibilityTimeoutSeconds sent on every ReceiveMessage
+     *     and written by every renew(), overriding the remote queue's
+     *     own attribute for the deliveries this instance takes
+     */
     public function __construct(
         private readonly SqsClient $client,
         private readonly string $queueNamePrefix = '',
+        private readonly int $visibilityTimeoutSeconds = 300,
     ) {
         QueueContract::assertValidQueueNamePrefix($queueNamePrefix);
+        self::assertValidVisibilityTimeout($visibilityTimeoutSeconds);
+    }
+
+    /**
+     * Exposed so SqsQueueFactory can reject a configured value before it
+     * builds a client, and so the admitted range cannot drift between
+     * the two call sites — the same reason
+     * Kinetis\Queue\QueueWorker exposes its own pre-flight checks.
+     */
+    public static function assertValidVisibilityTimeout(int $seconds): void
+    {
+        if ($seconds < self::MIN_VISIBILITY_TIMEOUT_SECONDS || $seconds > self::MAX_VISIBILITY_TIMEOUT_SECONDS) {
+            throw new InvalidArgumentException(
+                'a renewable SQS delivery needs a visibility timeout between '
+                . self::MIN_VISIBILITY_TIMEOUT_SECONDS . ' and ' . self::MAX_VISIBILITY_TIMEOUT_SECONDS
+                . " seconds, got {$seconds}.",
+            );
+        }
     }
 
     #[\Override]
@@ -288,10 +335,10 @@ final class SqsQueue implements QueueInterface
     {
         QueueContract::assertValidReleaseDelay($delaySeconds);
 
-        if ($delaySeconds > self::MAX_RELEASE_DELAY_SECONDS) {
+        if ($delaySeconds > self::MAX_VISIBILITY_TIMEOUT_SECONDS) {
             throw new InvalidArgumentException(
                 'ChangeMessageVisibility accepts a VisibilityTimeout of at most '
-                . self::MAX_RELEASE_DELAY_SECONDS . " seconds (requested {$delaySeconds}).",
+                . self::MAX_VISIBILITY_TIMEOUT_SECONDS . " seconds (requested {$delaySeconds}).",
             );
         }
 
@@ -306,6 +353,29 @@ final class SqsQueue implements QueueInterface
     public function fail(QueuedJob $job): void
     {
         $this->deleteMessage($job->queue, (string) $job->handle);
+    }
+
+    #[\Override]
+    public function visibilityTimeoutSeconds(): int
+    {
+        return $this->visibilityTimeoutSeconds;
+    }
+
+    /**
+     * One ChangeMessageVisibility re-timing this receipt's invisibility
+     * to the full configured window, counted from the call. The receipt
+     * handle is the fence SQS itself applies; as everywhere else in this
+     * backend, whatever SQS answers propagates unchanged and no
+     * stale-receipt detection is fabricated locally.
+     */
+    #[\Override]
+    public function renew(QueuedJob $job): void
+    {
+        $this->client->changeMessageVisibility([
+            'QueueUrl' => $this->resolveQueueUrl($job->queue),
+            'ReceiptHandle' => (string) $job->handle,
+            'VisibilityTimeout' => $this->visibilityTimeoutSeconds,
+        ])->resolve();
     }
 
     /**
@@ -351,6 +421,7 @@ final class SqsQueue implements QueueInterface
             'QueueUrl' => $this->resolveQueueUrl($queue),
             'MaxNumberOfMessages' => 1,
             'WaitTimeSeconds' => $waitTimeSeconds,
+            'VisibilityTimeout' => $this->visibilityTimeoutSeconds,
             'AttributeNames' => [MessageSystemAttributeName::APPROXIMATE_RECEIVE_COUNT],
             'MessageAttributeNames' => [self::MAX_ATTEMPTS_ATTRIBUTE, self::METADATA_ATTRIBUTE],
         ]);
