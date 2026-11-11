@@ -14,6 +14,7 @@ use Kinetis\Queue\Exception\InvalidQueueArgumentException;
 use Kinetis\Queue\ClearableQueueInterface;
 use Kinetis\Queue\Exception\MalformedQueuedJobDataException;
 use Kinetis\Console\CommandArguments;
+use Kinetis\Console\Output;
 use Kinetis\Queue\Console\ClearCommand;
 use Kinetis\Queue\Job;
 use Kinetis\Queue\QueuedJob;
@@ -312,14 +313,19 @@ final class SqsQueueTest extends TestCase
         $transport = new RecordingSqsTransport();
         $queue = new SqsQueue(new SqsClient(['region' => 'us-east-1'], new NullProvider(), $transport->client()));
 
-        $output = fopen('php://memory', 'r+');
-        self::assertIsResource($output);
+        $stdout = fopen('php://memory', 'r+');
+        $stderr = fopen('php://memory', 'r+');
+        self::assertIsResource($stdout);
+        self::assertIsResource($stderr);
 
-        $code = new ClearCommand($queue, $output)->run(CommandArguments::parse(['--queue=default', '--force']));
-        rewind($output);
-        $reported = (string) stream_get_contents($output);
+        $code = new ClearCommand($queue, new Output($stdout, $stderr, false, false))
+            ->run(CommandArguments::parse(['--queue=default', '--force']));
+        rewind($stdout);
+        rewind($stderr);
+        $reported = (string) stream_get_contents($stderr);
 
         self::assertSame(1, $code);
+        self::assertSame('', (string) stream_get_contents($stdout));
         self::assertStringContainsString(SqsQueue::class, $reported);
         self::assertStringContainsString(ClearableQueueInterface::class, $reported);
         self::assertSame([], $transport->operations);
